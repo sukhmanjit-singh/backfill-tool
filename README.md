@@ -7,6 +7,40 @@ A high-performance CLI tool for executing bulk API requests using Postman collec
 
 ## 🚀 Features
 
+## 🎯 New in v2.1.0
+
+###  Real-time Progress Tracking
+- **Live progress bars** showing completion percentage
+- **Real-time metrics**: ✓ success count, ✗ failure count
+- **Performance stats**: Average response time, ETA calculations
+- **Colored output** for better visibility (green/red/yellow)
+
+### 📊 Comprehensive Metrics & Analytics
+- **Auto-save metrics** to JSON file after each run
+- **Per-request statistics**: min/max/avg response times
+- **Success rate tracking** with detailed breakdowns
+- **Throughput measurements**: requests per second
+- **Historical data**: Compare runs over time
+
+### ⚡ Failed Request Management
+- **Auto-save failed requests** to CSV (same format as input!)
+- **One-command retry**: Use failed CSV directly as input
+- **Separate files** for each request type
+- **Perfect for debugging** and iterative testing
+
+### 🛠️ Enhanced User Experience
+- **Built-in examples**: Run `backfill-tool examples` for detailed use cases
+- **Version info**: `backfill-tool version` shows features and build details
+- **Improved help text**: Real-world scenarios and best practices
+- **Template syntax guide** in CLI help
+
+### 🔄 CI/CD Ready
+- **Quiet mode** (`--quiet`): Suppress progress bars for clean logs
+- **Metrics always saved**: Even in quiet mode
+- **Exit codes**: Proper status codes for automation
+- **JSON output**: Machine-readable execution summary
+
+
 - **Postman Collection Support**: Import and execute Postman collections directly
 - **CSV Data Integration**: Use CSV files to dynamically populate request parameters
 - **Template Variable Replacement**: Support for `{{variable}}` syntax in:
@@ -614,3 +648,356 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Made with ❤️ for the API automation community**
+
+## 📊 Metrics & Analytics
+
+### Automatic Metrics Export
+
+Every run automatically generates a metrics JSON file with comprehensive statistics:
+
+```json
+{
+  "collection_name": "User Management API",
+  "csv_file": "data.csv",
+  "start_time": "2025-11-03T14:30:00Z",
+  "end_time": "2025-11-03T14:32:30Z",
+  "duration_seconds": 150.5,
+  "total_records": 1000,
+  "summary": {
+    "total_requests": 3000,
+    "successful": 2950,
+    "failed": 50,
+    "success_rate_pct": 98.33
+  },
+  "items": [
+    {
+      "name": "Create User",
+      "total_requests": 1000,
+      "successful": 987,
+      "failed": 13,
+      "success_rate_pct": 98.70,
+      "timing": {
+        "avg_ms": 145,
+        "min_ms": 89,
+        "max_ms": 2300
+      },
+      "duration_seconds": 145.2
+    }
+  ]
+}
+```
+
+### Custom Metrics Location
+
+Specify a custom path for metrics:
+
+```bash
+# Save to specific location
+./backfill-tool run -c collection.json -s data.csv --metrics-file ./results/run-$(date +%Y%m%d).json
+
+# Default location: metrics_YYYYMMDD_HHMMSS.json
+```
+
+## 🔄 Failed Request Workflow
+
+### How It Works
+
+1. **Automatic Detection**: Failed requests (non-2xx status codes, timeouts, errors) are tracked
+2. **CSV Export**: Saved in same format as input CSV for easy retry
+3. **One-Command Retry**: Use the failed CSV directly
+
+### Example Workflow
+
+```bash
+# Initial run
+./backfill-tool run -c collection.json -s data.csv -t 10
+
+# Output shows:
+# ❌ Failed requests saved to: failed_requests_Create_User_20251103_143000.csv
+
+# Retry just the failed requests
+./backfill-tool run -c collection.json -s failed_requests_Create_User_20251103_143000.csv -t 5
+
+# Repeat until all succeed or investigate errors
+```
+
+### Failed Request CSV Format
+
+The CSV contains exactly the same columns as your input CSV:
+
+**Original CSV** (`users.csv`):
+```csv
+userId,name,email
+1,John,john@example.com
+2,Jane,jane@example.com
+3,Bob,bob@example.com
+```
+
+**Failed Requests CSV** (`failed_requests_Create_User_20251103_143000.csv`):
+```csv
+userId,name,email
+2,Jane,jane@example.com
+3,Bob,bob@example.com
+```
+
+**Retry**:
+```bash
+./backfill-tool run -c collection.json -s failed_requests_Create_User_20251103_143000.csv -t 5
+```
+
+## 📈 Real-time Progress Display
+
+### Progress Bar Features
+
+The live progress bar shows:
+- **Completion**: Visual bar and percentage
+- **Success/Failure**: Live counts with colored indicators (✓ green, ✗ red)
+- **Performance**: Average response time in milliseconds
+- **ETA**: Estimated time to completion
+
+### Example Output
+
+```
+Progress: [████████████░░░░░░░░] 45/100 (45.0%) | ✓42 ✗3 | Avg: 234ms | ETA: 12s
+```
+
+### Quiet Mode for CI/CD
+
+Suppress progress bars while still saving metrics:
+
+```bash
+# Perfect for Jenkins, GitHub Actions, etc.
+./backfill-tool run -c collection.json -s data.csv -t 20 --quiet
+```
+
+## 🎨 Output Examples
+
+### Standard Output (Normal Mode)
+
+```
+🚀 Backfill Tool v2.1.0
+📦 Collection: example-collection.json
+📊 CSV Data: example-data.csv
+⚙️  Workers: 10
+
+📦 Collection: User Management API
+📊 Items found: 3
+📂 Reading CSV file: data.csv
+✓ Loaded 1000 records from CSV
+
+🔧 Processing: Create User
+   Method: POST | URL: https://api.example.com/users
+   Records: 1000 | Workers: 10
+
+Progress: [████████████████████] 1000/1000 (100%) | ✓987 ✗13 | Avg: 145ms | ETA: 0s
+   ❌ Failed requests saved to: failed_requests_Create_User_20251103_143000.csv
+
+📊 Summary:
+   Total:        1000
+   Successful:   987 (98.7%)
+   Failed:       13 (1.3%)
+   Avg Time:     145ms
+   Min Time:     89ms
+   Max Time:     2.3s
+   Duration:     2m 25s
+
+💾 Metrics saved to: metrics_20251103_143000.json
+
+============================================================
+🎯 EXECUTION COMPLETE
+============================================================
+Collection:     User Management API
+Total Requests: 3000
+Successful:     2950 (98.3%)
+Failed:         50 (1.7%)
+Duration:       7m 30s
+Throughput:     6.67 req/s
+============================================================
+```
+
+### Quiet Mode Output (CI/CD)
+
+```bash
+./backfill-tool run -c collection.json -s data.csv --quiet
+# (No output except errors)
+# Metrics still saved to metrics_YYYYMMDD_HHMMSS.json
+```
+
+## 🤖 CI/CD Integration
+
+### GitHub Actions Example
+
+```yaml
+name: Data Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_file:
+        description: 'CSV file to process'
+        required: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Install Backfill Tool
+        run: |
+          git clone https://github.com/sukhmanjit-singh/backfill-tool.git
+          cd backfill-tool
+          go build -o backfill-tool .
+      
+      - name: Run Backfill
+        run: |
+          ./backfill-tool/backfill-tool run \
+            --collection ./collections/api.json \
+            --csv ${{ github.event.inputs.csv_file }} \
+            --threads 20 \
+            --quiet \
+            --metrics-file ./metrics.json
+      
+      - name: Upload Metrics
+        uses: actions/upload-artifact@v3
+        with:
+          name: metrics
+          path: metrics.json
+      
+      - name: Upload Failed Requests
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: failed-requests
+          path: failed_requests_*.csv
+```
+
+### Jenkins Pipeline Example
+
+```groovy
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'CSV_FILE', description: 'CSV file path')
+        string(name: 'THREADS', defaultValue: '10', description: 'Worker threads')
+    }
+    
+    stages {
+        stage('Backfill') {
+            steps {
+                script {
+                    sh """
+                        ./backfill-tool run \
+                            -c ./collections/api.json \
+                            -s ${params.CSV_FILE} \
+                            -t ${params.THREADS} \
+                            --quiet \
+                            --metrics-file ./metrics.json
+                    """
+                }
+            }
+        }
+        
+        stage('Archive Results') {
+            steps {
+                archiveArtifacts artifacts: 'metrics.json', allowEmptyArchive: false
+                archiveArtifacts artifacts: 'failed_requests_*.csv', allowEmptyArchive: true
+            }
+        }
+    }
+}
+```
+
+## 💡 Pro Tips
+
+### 1. Optimal Thread Count
+
+```bash
+# Start conservative
+./backfill-tool run -c collection.json -s data.csv -t 5
+
+# Monitor avg response time in progress bar
+# If stable and fast, increase threads
+
+./backfill-tool run -c collection.json -s data.csv -t 20
+
+# Watch for rate limiting (sudden spikes in response time)
+```
+
+### 2. Retry Strategy
+
+```bash
+# First attempt with normal thread count
+./backfill-tool run -c collection.json -s data.csv -t 10
+
+# Retry failures with lower threads (might be rate limiting)
+./backfill-tool run -c collection.json -s failed_requests_*.csv -t 2
+
+# Final retry with minimal threads
+./backfill-tool run -c collection.json -s failed_requests_*.csv -t 1
+```
+
+### 3. Metrics Analysis
+
+```bash
+# Extract success rate from metrics
+cat metrics_*.json | jq '.summary.success_rate_pct'
+
+# Find slowest requests
+cat metrics_*.json | jq '.items | sort_by(.timing.max_ms) | reverse | .[0]'
+
+# Compare two runs
+diff <(cat metrics_run1.json | jq '.summary') <(cat metrics_run2.json | jq '.summary')
+```
+
+### 4. Debugging Failed Requests
+
+```bash
+# Run with verbose mode for detailed logging
+./backfill-tool run -c collection.json -s failed_requests_*.csv -t 1 --verbose
+
+# Check specific failure patterns
+cat metrics_*.json | jq '.items[] | select(.failed > 0)'
+```
+
+## 📝 Command Reference
+
+### Main Commands
+
+```bash
+# Run backfill with defaults
+backfill-tool run -c collection.json -s data.csv
+
+# Show all examples
+backfill-tool examples
+
+# Show version and features
+backfill-tool version
+
+# Get help for any command
+backfill-tool run --help
+```
+
+### Common Flag Combinations
+
+```bash
+# High performance mode
+backfill-tool run -c collection.json -s data.csv -t 50
+
+# Careful/debug mode
+backfill-tool run -c collection.json -s data.csv -t 1 --verbose
+
+# CI/CD mode
+backfill-tool run -c collection.json -s data.csv -t 20 --quiet --metrics-file ./output/metrics.json
+
+# Retry failures conservatively
+backfill-tool run -c collection.json -s failed_requests_*.csv -t 2
+```
+
