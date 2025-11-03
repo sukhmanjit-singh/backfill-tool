@@ -12,8 +12,33 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ANSI color codes for terminal output
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorGray   = "\033[90m"
+	colorBold   = "\033[1m"
+)
+
+// RunConfig contains all configuration for a batch run
+type RunConfig struct {
+	BatchSize   int
+	Threads     int
+	Collection  string
+	CSV         string
+	MetricsFile string
+	Verbose     bool
+	Quiet       bool
+}
 
 // PostmanCollection represents the top-level structure of a Postman collection JSON file
 type PostmanCollection struct {
@@ -24,7 +49,6 @@ type PostmanCollection struct {
 }
 
 // PostmanItem represents a single request or folder in the Postman collection
-// Items can be nested to represent folders containing other items
 type PostmanItem struct {
 	Name    string         `json:"name"`
 	Request PostmanRequest `json:"request"`
@@ -40,10 +64,9 @@ type PostmanRequest struct {
 }
 
 // PostmanURL represents the URL structure in Postman collections
-// Postman can represent URLs as objects with multiple fields, but we primarily use the raw string
 type PostmanURL struct {
-	Raw   string        `json:"raw"`
-	Query []QueryParam  `json:"query,omitempty"`
+	Raw   string       `json:"raw"`
+	Query []QueryParam `json:"query,omitempty"`
 }
 
 // QueryParam represents a query parameter in the URL
@@ -54,7 +77,7 @@ type QueryParam struct {
 
 // PostmanBody represents the request body in a Postman request
 type PostmanBody struct {
-	Mode string `json:"mode,omitempty"` // raw, urlencoded, formdata, etc.
+	Mode string `json:"mode,omitempty"`
 	Raw  string `json:"raw,omitempty"`
 }
 
@@ -64,278 +87,635 @@ type PostmanHeader struct {
 	Value string `json:"value"`
 }
 
+// RequestResult represents the outcome of a single HTTP request
+type RequestResult struct {
+	Success       bool
+	StatusCode    int
+	ResponseTime  time.Duration
+	Message       string
+	RecordInfo    string
+	Error         string
+	URL           string
+	Method        string
+	CSVData       map[string]string
+	RequestName   string
+	Timestamp     time.Time
+}
+
+// RequestMetrics tracks statistics for a request or collection item
+type RequestMetrics struct {
+	Name           string
+	TotalRequests  int64
+	SuccessCount   int64
+	FailureCount   int64
+	TotalTime      time.Duration
+	MinTime        time.Duration
+	MaxTime        time.Duration
+	StartTime      time.Time
+	EndTime        time.Time
+	FailedRequests []RequestResult
+}
+
+// RunMetrics tracks overall execution metrics
+type RunMetrics struct {
+	CollectionName string
+	CSVFile        string
+	StartTime      time.Time
+	EndTime        time.Time
+	TotalRecords   int
+	ItemMetrics    []RequestMetrics
+}
+
+// ProgressTracker manages real-time progress display
+type ProgressTracker struct {
+	total       int64
+	current     int64
+	success     int64
+	failure     int64
+	startTime   time.Time
+	quiet       bool
+	mu          sync.Mutex
+	lastPrint   time.Time
+	description string
+}
+
+// NewProgressTracker creates a new progress tracker
+func NewProgressTracker(total int, description string, quiet bool) *ProgressTracker {
+	return &ProgressTracker{
+		total:       int64(total),
+		current:     0,
+		success:     0,
+		failure:     0,
+		startTime:   time.Now(),
+		quiet:       quiet,
+		lastPrint:   time.Now(),
+		description: description,
+	}
+}
+
+// Update increments progress and updates display
+func (p *ProgressTracker) Update(success bool) {
+	atomic.AddInt64(&p.current, 1)
+	if success {
+		atomic.AddInt64(&p.success, 1)
+	} else {
+		atomic.AddInt64(&p.failure, 1)
+	}
+
+	if !p.quiet {
+		p.mu.Lock()
+		// Update display every 100ms to avoid flickering
+		if time.Since(p.lastPrint) > 100*time.Millisecond {
+			p.display()
+			p.lastPrint = time.Now()
+		}
+		p.mu.Unlock()
+	}
+}
+
+// Finish completes the progress display
+func (p *ProgressTracker) Finish() {
+	if !p.quiet {
+		p.mu.Lock()
+		p.display()
+		fmt.Println() // New line after progress
+		p.mu.Unlock()
+	}
+}
+
+// display renders the progress bar
+func (p *ProgressTracker) display() {
+	current := atomic.LoadInt64(&p.current)
+	success := atomic.LoadInt64(&p.success)
+	failure := atomic.LoadInt64(&p.failure)
+
+	percent := float64(current) / float64(p.total) * 100
+	elapsed := time.Since(p.startTime)
+	avgTime := elapsed / time.Duration(current+1)
+	eta := avgTime * time.Duration(p.total-current)
+
+	// Create progress bar (40 characters wide)
+	barWidth := 40
+	filled := int(float64(barWidth) * percent / 100)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	// Format output with colors
+	fmt.Printf("\r%sProgress:%s [%s] %d/%d (%.1f%%) | %s✓%d%s %s✗%d%s | Avg: %dms | ETA: %s  ",
+		colorBold, colorReset,
+		bar,
+		current, p.total, percent,
+		colorGreen, success, colorReset,
+		colorRed, failure, colorReset,
+		avgTime.Milliseconds(),
+		formatDuration(eta))
+}
+
+// formatDuration formats duration for display
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm%ds", minutes, seconds)
+}
+
+// colorize applies color to text
+func colorize(color, text string) string {
+	return color + text + colorReset
+}
+
 // RunBatch is the main entry point for processing a Postman collection with CSV data
-// It orchestrates the entire backfill process:
-// 1. Loads the Postman collection
-// 2. Reads the CSV data once
-// 3. Processes all requests (including nested folders) with the specified number of worker threads
-//
-// Parameters:
-//   - batchSize: Number of records to process per batch (currently informational)
-//   - threads: Number of concurrent worker goroutines to spawn
-//   - collection: Path to the Postman collection JSON file
-//   - csv: Path to the CSV file containing data to backfill
-func RunBatch(batchSize int, threads int, collection string, csv string) {
+func RunBatch(config RunConfig) {
+	startTime := time.Now()
+
 	// Validate input parameters
-	if collection == "" {
-		fmt.Println("Error: Collection file path is required")
+	if config.Collection == "" {
+		fmt.Println(colorize(colorRed, "Error: Collection file path is required"))
 		return
 	}
-	if csv == "" {
-		fmt.Println("Error: CSV file path is required")
+	if config.CSV == "" {
+		fmt.Println(colorize(colorRed, "Error: CSV file path is required"))
 		return
 	}
-	if threads <= 0 {
-		fmt.Println("Error: Number of threads must be greater than 0")
+	if config.Threads <= 0 {
+		fmt.Println(colorize(colorRed, "Error: Number of threads must be greater than 0"))
 		return
 	}
 
 	// Load and parse the Postman collection
-	jsonFile, err := os.Open(collection)
+	jsonFile, err := os.Open(config.Collection)
 	if err != nil {
-		fmt.Printf("Error opening collection file '%s': %v\n", collection, err)
+		fmt.Printf("%s\n", colorize(colorRed, fmt.Sprintf("Error opening collection file '%s': %v", config.Collection, err)))
 		return
 	}
 	defer jsonFile.Close()
 
 	var postmanCollection PostmanCollection
 	if err := json.NewDecoder(jsonFile).Decode(&postmanCollection); err != nil {
-		fmt.Printf("Error parsing collection JSON: %v\n", err)
+		fmt.Printf("%s\n", colorize(colorRed, fmt.Sprintf("Error parsing collection JSON: %v", err)))
 		return
 	}
 
-	fmt.Printf("📦 Collection: %s\n", postmanCollection.Info.Name)
-	fmt.Printf("📊 Items found: %d\n", len(postmanCollection.Item))
+	if !config.Quiet {
+		fmt.Printf("%s\n", colorize(colorCyan+colorBold, "📦 Collection: "+postmanCollection.Info.Name))
+		fmt.Printf("📊 Items found: %s\n", colorize(colorYellow, fmt.Sprintf("%d", len(postmanCollection.Item))))
+	}
 
-	// Read CSV data once and reuse for all requests (optimization)
-	fmt.Printf("📂 Reading CSV file: %s\n", csv)
-	requestList, err := ReadCSV(csv)
+	// Read CSV data once and reuse for all requests
+	if !config.Quiet {
+		fmt.Printf("📂 Reading CSV file: %s\n", config.CSV)
+	}
+	requestList, err := ReadCSV(config.CSV)
 	if err != nil {
-		fmt.Printf("Error reading CSV file: %v\n", err)
+		fmt.Printf("%s\n", colorize(colorRed, fmt.Sprintf("Error reading CSV file: %v", err)))
 		return
 	}
-	fmt.Printf("✓ Loaded %d records from CSV\n\n", len(requestList))
+
+	if !config.Quiet {
+		fmt.Printf("%s\n\n", colorize(colorGreen, fmt.Sprintf("✓ Loaded %d records from CSV", len(requestList))))
+	}
 
 	if len(requestList) == 0 {
-		fmt.Println("Warning: No data records found in CSV file (only headers)")
+		fmt.Println(colorize(colorYellow, "Warning: No data records found in CSV file (only headers)"))
 		return
 	}
 
-	// Process all items in the collection recursively (including nested folders)
-	for _, item := range postmanCollection.Item {
-		processItem(item, requestList, threads, 0)
+	// Initialize run metrics
+	runMetrics := &RunMetrics{
+		CollectionName: postmanCollection.Info.Name,
+		CSVFile:        config.CSV,
+		StartTime:      startTime,
+		TotalRecords:   len(requestList),
+		ItemMetrics:    []RequestMetrics{},
 	}
 
-	fmt.Println("\n✓ All requests completed")
+	// Process all items in the collection recursively
+	for _, item := range postmanCollection.Item {
+		processItem(item, requestList, config, runMetrics, 0)
+	}
+
+	runMetrics.EndTime = time.Now()
+
+	// Save metrics to file
+	if err := saveMetrics(runMetrics, config); err != nil && config.Verbose {
+		fmt.Printf("%s\n", colorize(colorYellow, fmt.Sprintf("Warning: Failed to save metrics: %v", err)))
+	}
+
+	// Print final summary
+	if !config.Quiet {
+		printFinalSummary(runMetrics)
+	}
 }
 
 // processItem recursively processes a Postman item (request or folder)
-// If the item has nested items (folder), it processes them recursively
-// If the item is a request, it executes it with all CSV records using worker threads
-//
-// Parameters:
-//   - item: The Postman item to process
-//   - requestList: CSV data as a slice of maps (each map is one CSV row)
-//   - threads: Number of concurrent workers to use
-//   - depth: Current nesting depth (for formatting output)
-func processItem(item PostmanItem, requestList []map[string]string, threads int, depth int) {
+func processItem(item PostmanItem, requestList []map[string]string, config RunConfig, runMetrics *RunMetrics, depth int) {
 	indent := strings.Repeat("  ", depth)
 
-	// Check if this is a folder (has nested items)
+	// Check if this is a folder
 	if len(item.Item) > 0 {
-		fmt.Printf("%s📁 Folder: %s\n", indent, item.Name)
-		// Recursively process all items in the folder
+		if !config.Quiet {
+			fmt.Printf("%s%s\n", indent, colorize(colorCyan, "📁 Folder: "+item.Name))
+		}
 		for _, nestedItem := range item.Item {
-			processItem(nestedItem, requestList, threads, depth+1)
+			processItem(nestedItem, requestList, config, runMetrics, depth+1)
 		}
 		return
 	}
 
-	// This is a request item (not a folder)
-	fmt.Printf("%s🔧 Processing request: %s\n", indent, item.Name)
-	fmt.Printf("%s   Method: %s\n", indent, item.Request.Method)
-	fmt.Printf("%s   URL: %s\n", indent, item.Request.URL.Raw)
-	fmt.Printf("%s   Records to process: %d\n", indent, len(requestList))
-	fmt.Printf("%s   Workers: %d\n", indent, threads)
+	// This is a request item
+	metrics := RequestMetrics{
+		Name:           item.Name,
+		TotalRequests:  int64(len(requestList)),
+		SuccessCount:   0,
+		FailureCount:   0,
+		MinTime:        time.Hour, // Will be updated
+		MaxTime:        0,
+		StartTime:      time.Now(),
+		FailedRequests: []RequestResult{},
+	}
 
-	// Create channels for distributing work and collecting results
+	if !config.Quiet {
+		fmt.Printf("%s%s\n", indent, colorize(colorBold, "🔧 Processing: "+item.Name))
+		fmt.Printf("%s   Method: %s | URL: %s\n", indent,
+			colorize(colorPurple, item.Request.Method),
+			colorize(colorGray, item.Request.URL.Raw))
+		fmt.Printf("%s   Records: %s | Workers: %s\n", indent,
+			colorize(colorYellow, fmt.Sprintf("%d", len(requestList))),
+			colorize(colorYellow, fmt.Sprintf("%d", config.Threads)))
+		fmt.Println()
+	}
+
+	// Create progress tracker
+	progress := NewProgressTracker(len(requestList), item.Name, config.Quiet)
+
+	// Create channels
 	recordsChan := make(chan map[string]string, len(requestList))
 	resultsChan := make(chan RequestResult, len(requestList))
 
-	// Create a wait group to synchronize worker goroutines
 	var wg sync.WaitGroup
+	var mu sync.Mutex // Protect metrics updates
 
-	// Spawn worker goroutines
-	for i := 1; i <= threads; i++ {
+	// Spawn workers
+	for i := 1; i <= config.Threads; i++ {
 		wg.Add(1)
-		go worker(i, item, recordsChan, resultsChan, &wg, indent)
+		go worker(i, item, recordsChan, resultsChan, &wg, config)
 	}
 
-	// Distribute all CSV records to workers through the channel
+	// Distribute work
 	for _, record := range requestList {
 		recordsChan <- record
 	}
-	close(recordsChan) // Signal no more records will be sent
+	close(recordsChan)
 
-	// Wait for all workers to complete
-	wg.Wait()
-	close(resultsChan) // Signal no more results will be sent
+	// Collect results in background
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
 
-	// Collect and display results
-	successCount := 0
-	failureCount := 0
-	fmt.Printf("%s\n%s📊 Results:\n", indent, indent)
+	// Process results
 	for result := range resultsChan {
+		mu.Lock()
 		if result.Success {
-			successCount++
-			fmt.Printf("%s   ✓ [%d] %s - %s\n", indent, result.StatusCode, result.Message, result.RecordInfo)
+			metrics.SuccessCount++
 		} else {
-			failureCount++
-			fmt.Printf("%s   ✗ [ERROR] %s - %s\n", indent, result.Message, result.RecordInfo)
+			metrics.FailureCount++
+			metrics.FailedRequests = append(metrics.FailedRequests, result)
+		}
+
+		// Update timing metrics
+		if result.ResponseTime < metrics.MinTime {
+			metrics.MinTime = result.ResponseTime
+		}
+		if result.ResponseTime > metrics.MaxTime {
+			metrics.MaxTime = result.ResponseTime
+		}
+		metrics.TotalTime += result.ResponseTime
+		mu.Unlock()
+
+		progress.Update(result.Success)
+	}
+
+	progress.Finish()
+	metrics.EndTime = time.Now()
+
+	// Save failed requests to CSV
+	if len(metrics.FailedRequests) > 0 {
+		failedFile := saveFailedRequests(metrics.FailedRequests, item.Name)
+		if !config.Quiet && failedFile != "" {
+			fmt.Printf("%s   %s\n", indent, colorize(colorYellow, "❌ Failed requests saved to: "+failedFile))
 		}
 	}
 
-	fmt.Printf("%s\n%s✓ Completed: %d successful, %d failed\n\n", indent, indent, successCount, failureCount)
+	// Print summary for this item
+	if !config.Quiet {
+		printRequestSummary(metrics, indent)
+	}
+
+	runMetrics.ItemMetrics = append(runMetrics.ItemMetrics, metrics)
 }
 
-// RequestResult represents the outcome of a single HTTP request
-type RequestResult struct {
-	Success    bool
-	StatusCode int
-	Message    string
-	RecordInfo string // Brief info about which CSV record was processed
-}
-
-// worker is a goroutine that processes CSV records and executes HTTP requests
-// Multiple workers run concurrently to achieve parallelism
-//
-// Parameters:
-//   - id: Worker identifier for logging
-//   - item: The Postman request item to execute
-//   - records: Channel from which to receive CSV records
-//   - results: Channel to send request results
-//   - wg: WaitGroup for synchronization
-//   - indent: Indentation string for formatted output
-func worker(id int, item PostmanItem, records chan map[string]string, results chan RequestResult, wg *sync.WaitGroup, indent string) {
+// worker processes CSV records and executes HTTP requests
+func worker(id int, item PostmanItem, records chan map[string]string, results chan RequestResult, wg *sync.WaitGroup, config RunConfig) {
 	defer wg.Done()
 
-	// Process records until the channel is closed
 	for csvRow := range records {
-		// Convert CSV row to a format suitable for template replacement
+		startTime := time.Now()
+
 		csvData := make(map[string]interface{})
 		for column, value := range csvRow {
 			csvData[column] = value
 		}
 
-		// Generate a brief identifier for this record (for logging)
 		recordInfo := getRecordInfo(csvRow)
 
-		// Replace variables in the request URL (path variables and query parameters)
-		finalURL, err := replaceURLVariables(item.Request.URL.Raw, csvRow)
-		if err != nil {
-			results <- RequestResult{
-				Success:    false,
-				Message:    fmt.Sprintf("Error processing URL: %v", err),
-				RecordInfo: recordInfo,
-			}
-			continue
+		result := RequestResult{
+			Timestamp:   startTime,
+			RequestName: item.Name,
+			Method:      item.Request.Method,
+			CSVData:     csvRow,
+			RecordInfo:  recordInfo,
 		}
 
-		// Replace variables in the request body
+		// Replace URL variables
+		finalURL, err := replaceURLVariables(item.Request.URL.Raw, csvRow)
+		if err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("Error processing URL: %v", err)
+			result.ResponseTime = time.Since(startTime)
+			results <- result
+			continue
+		}
+		result.URL = finalURL
+
+		// Replace body variables
 		var modifiedBody string
 		if item.Request.Body.Raw != "" {
 			modifiedBody, err = ReplaceJSONValues(item.Request.Body.Raw, csvData)
 			if err != nil {
-				// If JSON parsing fails, treat body as plain text and replace template variables
 				modifiedBody = replaceTemplateVariables(item.Request.Body.Raw, csvRow)
 			}
 		}
 
-		// Create the HTTP request
+		// Create HTTP request
 		req, err := http.NewRequest(item.Request.Method, finalURL, bytes.NewBufferString(modifiedBody))
 		if err != nil {
-			results <- RequestResult{
-				Success:    false,
-				Message:    fmt.Sprintf("Error creating request: %v", err),
-				RecordInfo: recordInfo,
-			}
+			result.Success = false
+			result.Error = fmt.Sprintf("Error creating request: %v", err)
+			result.ResponseTime = time.Since(startTime)
+			results <- result
 			continue
 		}
 
-		// Set headers with variable replacement
+		// Set headers
 		for _, header := range item.Request.Header {
 			if header.Key == "" || header.Value == "" {
 				continue
 			}
-			// Replace variables in header values
 			headerValue := replaceTemplateVariables(header.Value, csvRow)
 			req.Header.Set(header.Key, headerValue)
 		}
 
-		// Set default Content-Type for JSON bodies if not already set
+		// Default Content-Type
 		if modifiedBody != "" && req.Header.Get("Content-Type") == "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		// Execute the HTTP request with timeout
+		// Execute request
 		client := &http.Client{
 			Timeout: 30 * time.Second,
 		}
 
 		resp, err := client.Do(req)
 		if err != nil {
-			results <- RequestResult{
-				Success:    false,
-				Message:    fmt.Sprintf("Request failed: %v", err),
-				RecordInfo: recordInfo,
-			}
+			result.Success = false
+			result.Error = fmt.Sprintf("Request failed: %v", err)
+			result.ResponseTime = time.Since(startTime)
+			results <- result
 			continue
 		}
 
-		// Read response body
+		// Read response
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
+		result.ResponseTime = time.Since(startTime)
+		result.StatusCode = resp.StatusCode
+		result.Success = resp.StatusCode >= 200 && resp.StatusCode < 300
+
 		if err != nil {
-			results <- RequestResult{
-				Success:    false,
-				StatusCode: resp.StatusCode,
-				Message:    fmt.Sprintf("Error reading response: %v", err),
-				RecordInfo: recordInfo,
+			result.Error = fmt.Sprintf("Error reading response: %v", err)
+			result.Success = false
+		} else {
+			message := string(respBody)
+			if len(message) > 100 {
+				message = message[:100] + "..."
 			}
-			continue
+			result.Message = message
+
+			if !result.Success {
+				result.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, message)
+			}
 		}
 
-		// Determine if request was successful based on status code
-		success := resp.StatusCode >= 200 && resp.StatusCode < 300
-		message := string(respBody)
-		if len(message) > 100 {
-			message = message[:100] + "..."
-		}
-
-		results <- RequestResult{
-			Success:    success,
-			StatusCode: resp.StatusCode,
-			Message:    message,
-			RecordInfo: recordInfo,
-		}
+		results <- result
 	}
 }
 
+// saveFailedRequests saves failed requests to a CSV file for retry
+func saveFailedRequests(failedRequests []RequestResult, requestName string) string {
+	if len(failedRequests) == 0 {
+		return ""
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	safeName := strings.ReplaceAll(requestName, " ", "_")
+	filename := fmt.Sprintf("failed_requests_%s_%s.csv", safeName, timestamp)
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Get headers from first failed request (CSV columns)
+	if len(failedRequests) == 0 {
+		return ""
+	}
+
+	// Collect all unique CSV column names
+	headers := []string{}
+	headerMap := make(map[string]bool)
+	for _, fr := range failedRequests {
+		for key := range fr.CSVData {
+			if !headerMap[key] {
+				headers = append(headers, key)
+				headerMap[key] = true
+			}
+		}
+	}
+
+	// Write header
+	writer.Write(headers)
+
+	// Write failed request data (original CSV format for retry)
+	for _, fr := range failedRequests {
+		row := make([]string, len(headers))
+		for i, header := range headers {
+			row[i] = fr.CSVData[header]
+		}
+		writer.Write(row)
+	}
+
+	return filename
+}
+
+// saveMetrics saves execution metrics to JSON file
+func saveMetrics(runMetrics *RunMetrics, config RunConfig) error {
+	// Determine filename
+	filename := config.MetricsFile
+	if filename == "" {
+		timestamp := time.Now().Format("20060102_150405")
+		filename = fmt.Sprintf("metrics_%s.json", timestamp)
+	}
+
+	// Calculate summary statistics
+	totalSuccess := int64(0)
+	totalFailure := int64(0)
+	totalRequests := int64(0)
+	for _, item := range runMetrics.ItemMetrics {
+		totalSuccess += item.SuccessCount
+		totalFailure += item.FailureCount
+		totalRequests += item.TotalRequests
+	}
+
+	// Create output structure
+	output := map[string]interface{}{
+		"collection_name": runMetrics.CollectionName,
+		"csv_file":        runMetrics.CSVFile,
+		"start_time":      runMetrics.StartTime.Format(time.RFC3339),
+		"end_time":        runMetrics.EndTime.Format(time.RFC3339),
+		"duration_seconds": runMetrics.EndTime.Sub(runMetrics.StartTime).Seconds(),
+		"total_records":   runMetrics.TotalRecords,
+		"summary": map[string]interface{}{
+			"total_requests":   totalRequests,
+			"successful":       totalSuccess,
+			"failed":           totalFailure,
+			"success_rate_pct": float64(totalSuccess) / float64(totalRequests) * 100,
+		},
+		"items": []map[string]interface{}{},
+	}
+
+	// Add per-item metrics
+	items := []map[string]interface{}{}
+	for _, item := range runMetrics.ItemMetrics {
+		avgTime := time.Duration(0)
+		if item.SuccessCount+item.FailureCount > 0 {
+			avgTime = item.TotalTime / time.Duration(item.SuccessCount+item.FailureCount)
+		}
+
+		itemData := map[string]interface{}{
+			"name":            item.Name,
+			"total_requests":  item.TotalRequests,
+			"successful":      item.SuccessCount,
+			"failed":          item.FailureCount,
+			"success_rate_pct": float64(item.SuccessCount) / float64(item.TotalRequests) * 100,
+			"timing": map[string]interface{}{
+				"avg_ms": avgTime.Milliseconds(),
+				"min_ms": item.MinTime.Milliseconds(),
+				"max_ms": item.MaxTime.Milliseconds(),
+			},
+			"duration_seconds": item.EndTime.Sub(item.StartTime).Seconds(),
+		}
+		items = append(items, itemData)
+	}
+	output["items"] = items
+
+	// Write to file
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return err
+	}
+
+	if !config.Quiet {
+		fmt.Printf("\n%s\n", colorize(colorGreen, "💾 Metrics saved to: "+filename))
+	}
+
+	return nil
+}
+
+// printRequestSummary prints summary for a single request
+func printRequestSummary(metrics RequestMetrics, indent string) {
+	fmt.Println()
+	fmt.Printf("%s%s\n", indent, colorize(colorBold, "📊 Summary:"))
+
+	successRate := float64(metrics.SuccessCount) / float64(metrics.TotalRequests) * 100
+	avgTime := time.Duration(0)
+	if metrics.SuccessCount+metrics.FailureCount > 0 {
+		avgTime = metrics.TotalTime / time.Duration(metrics.SuccessCount+metrics.FailureCount)
+	}
+
+	fmt.Printf("%s   Total:        %s\n", indent, colorize(colorCyan, fmt.Sprintf("%d", metrics.TotalRequests)))
+	fmt.Printf("%s   Successful:   %s (%.1f%%)\n", indent, colorize(colorGreen, fmt.Sprintf("%d", metrics.SuccessCount)), successRate)
+	fmt.Printf("%s   Failed:       %s (%.1f%%)\n", indent, colorize(colorRed, fmt.Sprintf("%d", metrics.FailureCount)), 100-successRate)
+	fmt.Printf("%s   Avg Time:     %dms\n", indent, avgTime.Milliseconds())
+	fmt.Printf("%s   Min Time:     %dms\n", indent, metrics.MinTime.Milliseconds())
+	fmt.Printf("%s   Max Time:     %dms\n", indent, metrics.MaxTime.Milliseconds())
+	fmt.Printf("%s   Duration:     %s\n", indent, formatDuration(metrics.EndTime.Sub(metrics.StartTime)))
+	fmt.Println()
+}
+
+// printFinalSummary prints overall execution summary
+func printFinalSummary(runMetrics *RunMetrics) {
+	totalSuccess := int64(0)
+	totalFailure := int64(0)
+	totalRequests := int64(0)
+
+	for _, item := range runMetrics.ItemMetrics {
+		totalSuccess += item.SuccessCount
+		totalFailure += item.FailureCount
+		totalRequests += item.TotalRequests
+	}
+
+	duration := runMetrics.EndTime.Sub(runMetrics.StartTime)
+	throughput := float64(totalRequests) / duration.Seconds()
+
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("%s\n", colorize(colorBold+colorCyan, "🎯 EXECUTION COMPLETE"))
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("Collection:     %s\n", runMetrics.CollectionName)
+	fmt.Printf("Total Requests: %s\n", colorize(colorCyan, fmt.Sprintf("%d", totalRequests)))
+	fmt.Printf("Successful:     %s (%.1f%%)\n", colorize(colorGreen, fmt.Sprintf("%d", totalSuccess)), float64(totalSuccess)/float64(totalRequests)*100)
+	fmt.Printf("Failed:         %s (%.1f%%)\n", colorize(colorRed, fmt.Sprintf("%d", totalFailure)), float64(totalFailure)/float64(totalRequests)*100)
+	fmt.Printf("Duration:       %s\n", colorize(colorYellow, formatDuration(duration)))
+	fmt.Printf("Throughput:     %s req/s\n", colorize(colorYellow, fmt.Sprintf("%.2f", throughput)))
+	fmt.Println(strings.Repeat("=", 60))
+}
+
 // getRecordInfo creates a brief string representation of a CSV record for logging
-// It uses the first few fields to identify the record
 func getRecordInfo(record map[string]string) string {
 	if len(record) == 0 {
 		return "empty record"
 	}
 
-	// Try to use common identifier fields
 	for _, key := range []string{"id", "ID", "name", "Name", "email", "Email"} {
 		if val, ok := record[key]; ok && val != "" {
 			return fmt.Sprintf("%s=%s", key, val)
 		}
 	}
 
-	// Otherwise, use the first field
 	for key, val := range record {
 		return fmt.Sprintf("%s=%s", key, val)
 	}
@@ -344,95 +724,51 @@ func getRecordInfo(record map[string]string) string {
 }
 
 // replaceURLVariables replaces template variables in the URL
-// It handles both path variables (e.g., /users/{{userId}}) and query parameters
-//
-// Template syntax: {{variableName}} gets replaced with the value from CSV
-//
-// Examples:
-//   - /api/users/{{userId}} -> /api/users/123
-//   - /api/search?q={{query}}&limit={{limit}} -> /api/search?q=test&limit=10
 func replaceURLVariables(rawURL string, csvData map[string]string) (string, error) {
-	// Replace template variables in the URL
 	finalURL := replaceTemplateVariables(rawURL, csvData)
-
-	// Validate the URL
 	_, err := url.Parse(finalURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL after replacement: %v", err)
 	}
-
 	return finalURL, nil
 }
 
 // replaceTemplateVariables replaces all {{variableName}} patterns in a string
-// with corresponding values from the CSV data
-//
-// Parameters:
-//   - template: String containing {{variable}} patterns
-//   - data: Map of variable names to values
-//
-// Returns: String with all variables replaced
 func replaceTemplateVariables(template string, data map[string]string) string {
-	// Regular expression to match {{variableName}} patterns
 	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
-
-	// Replace all matches
 	result := re.ReplaceAllStringFunc(template, func(match string) string {
-		// Extract variable name (remove {{ and }})
 		varName := strings.TrimSpace(match[2 : len(match)-2])
-
-		// Look up value in CSV data
 		if value, exists := data[varName]; exists {
 			return value
 		}
-
-		// If variable not found in CSV, keep the original placeholder
 		return match
 	})
-
 	return result
 }
 
 // ReadCSV reads a CSV file and returns its contents as a slice of maps
-// Each map represents one row, with column headers as keys
-//
-// Parameters:
-//   - filepath: Path to the CSV file
-//
-// Returns:
-//   - Slice of maps, where each map represents a CSV row
-//   - Error if file cannot be read or parsed
 func ReadCSV(filepath string) ([]map[string]string, error) {
-	// Open the CSV file
 	file, err := os.Open(filepath)
 	if err != nil {
 		return nil, fmt.Errorf("error opening file: %v", err)
 	}
 	defer file.Close()
 
-	// Create CSV reader
 	reader := csv.NewReader(file)
-
-	// Read all records
 	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("error reading CSV: %v", err)
 	}
 
-	// Validate CSV has content
 	if len(records) == 0 {
 		return nil, fmt.Errorf("CSV file is empty")
 	}
 
-	// First row contains headers
 	headers := records[0]
-
-	// Validate headers
 	if len(headers) == 0 {
 		return nil, fmt.Errorf("CSV file has no headers")
 	}
 
-	// Convert each data row to a map
 	var rows []map[string]string
 	for i := 1; i < len(records); i++ {
 		row := make(map[string]string)
@@ -440,7 +776,6 @@ func ReadCSV(filepath string) ([]map[string]string, error) {
 			if j < len(records[i]) {
 				row[header] = records[i][j]
 			} else {
-				// Handle rows with fewer columns than headers
 				row[header] = ""
 			}
 		}
@@ -451,36 +786,19 @@ func ReadCSV(filepath string) ([]map[string]string, error) {
 }
 
 // ReplaceJSONValues replaces values in a JSON string with values from CSV data
-// It handles nested JSON objects and arrays
-//
-// This function uses two strategies:
-// 1. Direct key matching: If a JSON key matches a CSV column, replace the value
-// 2. Template matching: Replace {{variableName}} patterns in string values
-//
-// Parameters:
-//   - jsonString: JSON string (typically from request body)
-//   - replacements: Map of CSV column names to values
-//
-// Returns:
-//   - Modified JSON string with values replaced
-//   - Error if JSON is invalid
 func ReplaceJSONValues(jsonString string, replacements map[string]interface{}) (string, error) {
-	// Handle empty JSON
 	if strings.TrimSpace(jsonString) == "" {
 		return jsonString, nil
 	}
 
-	// Parse JSON string into a map or array
 	var jsonData interface{}
 	err := json.Unmarshal([]byte(jsonString), &jsonData)
 	if err != nil {
 		return "", fmt.Errorf("error parsing JSON: %v", err)
 	}
 
-	// Replace values recursively
 	replaceValuesRecursive(jsonData, replacements)
 
-	// Convert back to JSON string
 	modifiedJSON, err := json.Marshal(jsonData)
 	if err != nil {
 		return "", fmt.Errorf("error converting to JSON: %v", err)
@@ -490,43 +808,34 @@ func ReplaceJSONValues(jsonString string, replacements map[string]interface{}) (
 }
 
 // replaceValuesRecursive recursively processes JSON data structures and replaces values
-// It handles maps (objects), slices (arrays), and string template patterns
 func replaceValuesRecursive(data interface{}, replacements map[string]interface{}) {
 	switch v := data.(type) {
 	case map[string]interface{}:
-		// Process each key-value pair in the object
 		for key, value := range v {
-			// Strategy 1: Direct key matching
 			if newValue, exists := replacements[key]; exists {
 				v[key] = newValue
 			} else {
-				// Strategy 2: If value is a string with templates, replace them
 				if strValue, ok := value.(string); ok {
-					// Convert replacements to string map for template replacement
 					strReplacements := make(map[string]string)
 					for k, val := range replacements {
 						strReplacements[k] = fmt.Sprintf("%v", val)
 					}
 					v[key] = replaceTemplateVariables(strValue, strReplacements)
 				} else {
-					// Recurse into nested structures
 					replaceValuesRecursive(value, replacements)
 				}
 			}
 		}
 
 	case []interface{}:
-		// Process each item in the array
 		for i, item := range v {
 			if strValue, ok := item.(string); ok {
-				// Replace templates in string array items
 				strReplacements := make(map[string]string)
 				for k, val := range replacements {
 					strReplacements[k] = fmt.Sprintf("%v", val)
 				}
 				v[i] = replaceTemplateVariables(strValue, strReplacements)
 			} else {
-				// Recurse into nested structures
 				replaceValuesRecursive(item, replacements)
 			}
 		}
