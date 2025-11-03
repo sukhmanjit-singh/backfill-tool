@@ -1,0 +1,6 @@
+name,year,userId,email,postId
+Alice Smith,2020,1,alice@example.com,1
+Bob Johnson,2021,2,bob@example.com,2
+Charlie Brown,2019,3,charlie@example.com,3
+Diana Prince,2022,4,diana@example.com,4
+Eve Wilson,2023,5,eve@example.com,5
