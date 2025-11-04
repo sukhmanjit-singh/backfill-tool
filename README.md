@@ -7,7 +7,17 @@ A high-performance CLI tool for executing bulk API requests using Postman collec
 
 ## 🚀 Features
 
-## 🎯 New in v2.1.0
+## 🎯 New in v2.3.0
+
+### 🔐 Authentication Support
+- **Bearer Token Authentication**: CLI override and collection-level support
+- **API Key Authentication**: Custom header-based auth
+- **Basic Authentication**: Username/password support
+- **Template Variables in Auth**: Use CSV data for dynamic tokens
+- **Auth Hierarchy**: CLI > Request > Collection priority
+- **Security Best Practices**: Environment variables and secret management
+
+## 🎯 v2.1.0 Features
 
 ###  Real-time Progress Tracking
 - **Live progress bars** showing completion percentage
@@ -43,11 +53,13 @@ A high-performance CLI tool for executing bulk API requests using Postman collec
 
 - **Postman Collection Support**: Import and execute Postman collections directly
 - **CSV Data Integration**: Use CSV files to dynamically populate request parameters
+- **Authentication Support**: Bearer tokens, API keys, and Basic auth with CLI override and template variables
 - **Template Variable Replacement**: Support for `{{variable}}` syntax in:
   - URL path variables (e.g., `/api/users/{{userId}}`)
   - Query parameters (e.g., `?name={{name}}&year={{year}}`)
   - Request headers (e.g., `Authorization: Bearer {{token}}`)
   - Request bodies (JSON and text)
+  - Authentication tokens (per-request or per-collection)
 - **Nested Folder Support**: Recursively process nested folders in Postman collections
 - **Concurrent Execution**: Configurable worker threads for parallel request processing
 - **Multiple HTTP Methods**: Support for GET, POST, PUT, PATCH, DELETE, and all other HTTP methods
@@ -60,6 +72,7 @@ A high-performance CLI tool for executing bulk API requests using Postman collec
 - [Quick Start](#quick-start)
 - [Usage](#usage)
 - [Examples](#examples)
+- [Authentication](#authentication)
 - [Template Variable Syntax](#template-variable-syntax)
 - [Configuration Options](#configuration-options)
 - [CSV File Format](#csv-file-format)
@@ -131,7 +144,10 @@ backfill-tool run [flags]
 | `--collection` | `-c` | Path to Postman collection JSON file | - | Yes |
 | `--csv` | `-s` | Path to CSV data file | - | Yes |
 | `--threads` | `-t` | Number of concurrent worker threads | 10 | No |
+| `--bearer-token` | `-a` | Bearer token for authentication (overrides collection auth) | - | No |
 | `--batch-size` | `-b` | Number of records per batch | 1000 | No |
+| `--metrics-file` | `-m` | Path to save execution metrics JSON | auto | No |
+| `--quiet` | `-q` | Quiet mode - suppress progress bars | false | No |
 | `--verbose` | `-v` | Enable verbose output | false | No |
 
 ### Example Commands
@@ -448,7 +464,413 @@ id,name,email,age,country
 - Tests/assertions
 - Form data (multipart/form-data)
 - File uploads
-- Authentication helpers (OAuth, etc.)
+- OAuth 2.0 flows (use bearer tokens from OAuth flow instead)
+
+## 🔐 Authentication
+
+Backfill Tool v2.3.0+ supports three types of authentication that can be configured in your Postman collection or via CLI flags.
+
+### Supported Authentication Types
+
+1. **Bearer Token** - Most common for API tokens
+2. **API Key** - Custom header-based authentication
+3. **Basic Auth** - Username and password authentication
+
+### Authentication Hierarchy
+
+Authentication is resolved in the following priority order:
+1. **CLI Override** (`--bearer-token` flag) - Highest priority
+2. **Request-level auth** (in Postman request)
+3. **Collection-level auth** (in Postman collection) - Lowest priority
+
+### Method 1: CLI Bearer Token Override
+
+Use the `--bearer-token` flag to override any collection auth:
+
+```bash
+# Static token
+./backfill-tool run -c collection.json -s data.csv -t 10 -a "your_bearer_token_here"
+
+# From environment variable (recommended for security)
+./backfill-tool run -c collection.json -s data.csv -t 10 -a "$API_TOKEN"
+
+# From command output
+./backfill-tool run -c collection.json -s data.csv -t 10 -a "$(cat token.txt)"
+```
+
+**When to use CLI override:**
+- Quick testing with different tokens
+- CI/CD pipelines with secret management
+- Override collection auth temporarily
+- Use tokens from environment variables
+
+### Method 2: Collection-Level Authentication
+
+Configure auth once in your Postman collection, applies to all requests.
+
+#### Bearer Token in Collection
+
+```json
+{
+  "info": {
+    "name": "My API Collection"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [...]
+}
+```
+
+**CSV File** (`data.csv`):
+```csv
+apiToken,userId,action
+sk_live_abc123,user1,create
+sk_live_abc123,user2,update
+```
+
+The `{{apiToken}}` template variable will be replaced with values from CSV.
+
+#### API Key in Collection
+
+```json
+{
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{apiKey}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [...]
+}
+```
+
+**CSV File**:
+```csv
+apiKey,resource
+abc123xyz,resource1
+def456uvw,resource2
+```
+
+#### Basic Auth in Collection
+
+```json
+{
+  "auth": {
+    "type": "basic",
+    "basic": [
+      {
+        "key": "username",
+        "value": "{{username}}",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "value": "{{password}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [...]
+}
+```
+
+**CSV File**:
+```csv
+username,password,endpoint
+admin,secret123,/admin/users
+user1,pass456,/user/profile
+```
+
+### Method 3: Request-Level Authentication
+
+Override collection auth for specific requests:
+
+```json
+{
+  "name": "Special Request",
+  "request": {
+    "method": "POST",
+    "url": {
+      "raw": "https://api.example.com/special"
+    },
+    "auth": {
+      "type": "bearer",
+      "bearer": [
+        {
+          "key": "token",
+          "value": "{{specialToken}}",
+          "type": "string"
+        }
+      ]
+    },
+    "header": [],
+    "body": {}
+  }
+}
+```
+
+**CSV File**:
+```csv
+specialToken,data
+special_abc123,value1
+special_def456,value2
+```
+
+### Template Variables in Authentication
+
+All authentication values support template variables from CSV:
+
+```csv
+token,userId,apiKey
+bearer_token_1,user1,key_abc
+bearer_token_2,user2,key_def
+bearer_token_3,user3,key_xyz
+```
+
+Each row can have different authentication credentials!
+
+### Common Authentication Patterns
+
+#### Pattern 1: Single Token for All Requests
+
+**CLI approach** (simplest):
+```bash
+./backfill-tool run -c collection.json -s data.csv -t 10 -a "$TOKEN"
+```
+
+**Collection approach** (works without flag):
+```json
+{
+  "auth": {
+    "type": "bearer",
+    "bearer": [{"key": "token", "value": "sk_live_abc123"}]
+  }
+}
+```
+
+#### Pattern 2: Different Tokens Per User
+
+**CSV File**:
+```csv
+userToken,userId,action
+token_user1,1,create
+token_user2,2,update
+token_user3,3,delete
+```
+
+**Collection Auth**:
+```json
+{
+  "auth": {
+    "type": "bearer",
+    "bearer": [{"key": "token", "value": "{{userToken}}"}]
+  }
+}
+```
+
+#### Pattern 3: API Key Header
+
+**CSV File**:
+```csv
+apiKey,customerId
+key_abc123,customer1
+key_def456,customer2
+```
+
+**Collection Auth**:
+```json
+{
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {"key": "key", "value": "X-API-Key"},
+      {"key": "value", "value": "{{apiKey}}"}
+    ]
+  }
+}
+```
+
+#### Pattern 4: Multi-Tenant with Different Auth
+
+**CSV File**:
+```csv
+tenantToken,tenantId,resource
+tenant_a_token,tenant_a,resource1
+tenant_b_token,tenant_b,resource2
+```
+
+**Collection**:
+```json
+{
+  "auth": {
+    "type": "bearer",
+    "bearer": [{"key": "token", "value": "{{tenantToken}}"}]
+  }
+}
+```
+
+### Security Best Practices
+
+1. **Never commit tokens to git**
+   ```bash
+   # Use environment variables
+   export API_TOKEN="your_token_here"
+   ./backfill-tool run -c collection.json -s data.csv -t 10 -a "$API_TOKEN"
+   ```
+
+2. **Use .env files (not committed)**
+   ```bash
+   # .env file (add to .gitignore!)
+   API_TOKEN=sk_live_abc123
+
+   # Load and run
+   source .env
+   ./backfill-tool run -c collection.json -s data.csv -t 10 -a "$API_TOKEN"
+   ```
+
+3. **Protect CSV files with tokens**
+   ```bash
+   # If CSV contains tokens, add to .gitignore
+   echo "data-with-tokens.csv" >> .gitignore
+   ```
+
+4. **Use secret management in CI/CD**
+   ```yaml
+   # GitHub Actions example
+   - name: Run backfill
+     env:
+       API_TOKEN: ${{ secrets.API_TOKEN }}
+     run: |
+       ./backfill-tool run -c collection.json -s data.csv -t 10 -a "$API_TOKEN"
+   ```
+
+### Troubleshooting Authentication
+
+#### Error: 401 Unauthorized
+
+**Possible causes:**
+- Token expired or invalid
+- Wrong token format (missing "Bearer " prefix is auto-added)
+- Token not properly loaded from CSV
+
+**Solutions:**
+```bash
+# Test with verbose mode
+./backfill-tool run -c collection.json -s data.csv -t 1 -v
+
+# Verify CSV has correct column name
+head -n 2 data.csv
+
+# Test with CLI override
+./backfill-tool run -c collection.json -s data.csv -t 1 -a "test_token"
+```
+
+#### Error: 403 Forbidden
+
+**Possible causes:**
+- Token valid but lacks permissions
+- Wrong API key header name
+- Rate limiting
+
+**Solutions:**
+- Verify token has required permissions
+- Check API key header name matches API docs
+- Reduce thread count: `-t 2`
+
+#### Template Variables Not Replaced
+
+**Issue:** Auth token shows `{{token}}` instead of actual value
+
+**Solutions:**
+1. Verify CSV column name matches exactly (case-sensitive):
+   ```csv
+   token,userId    ✓ Correct
+   Token,userId    ✗ Wrong case
+   apiToken,userId ✗ Different name
+   ```
+
+2. Check CSV file has data rows:
+   ```bash
+   # Should show at least 2 lines
+   wc -l data.csv
+   ```
+
+3. Verify no leading/trailing spaces in CSV headers
+
+### Example: Complete Authentication Flow
+
+**1. Postman Collection** (`api-collection.json`):
+```json
+{
+  "info": {
+    "name": "User API"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{authToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Create User",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "https://api.example.com/users"
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"name\": \"{{name}}\", \"email\": \"{{email}}\"}"
+        }
+      }
+    }
+  ]
+}
+```
+
+**2. CSV File** (`users.csv`):
+```csv
+authToken,name,email
+sk_live_abc123,Alice,alice@example.com
+sk_live_abc123,Bob,bob@example.com
+sk_test_xyz789,Charlie,charlie@test.com
+```
+
+**3. Run Command**:
+```bash
+# Uses tokens from CSV (different token for Charlie)
+./backfill-tool run -c api-collection.json -s users.csv -t 10
+
+# Or override with single token for all
+./backfill-tool run -c api-collection.json -s users.csv -t 10 -a "$PROD_TOKEN"
+```
+
+**4. Result**:
+- Alice and Bob use `sk_live_abc123`
+- Charlie uses `sk_test_xyz789` (unless overridden with `-a`)
+- All requests include `Authorization: Bearer <token>` header
 
 ## 🎯 Advanced Usage
 

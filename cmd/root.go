@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "2.2.0"
+const version = "2.3.0"
 
 var (
 	verbose bool
@@ -25,7 +25,8 @@ bulk testing, and API automation tasks.
 
 Features:
   • Execute Postman collections with CSV data
-  • Template variables in URLs, headers, and bodies ({{variable}})
+  • Template variables in URLs, headers, bodies, and auth ({{variable}})
+  • Authentication support (Bearer, API Key, Basic)
   • Concurrent request processing with configurable workers
   • Real-time progress tracking with metrics
   • Automatic logging of failed requests
@@ -61,6 +62,7 @@ var versionCmd = &cobra.Command{
 		fmt.Println("  ✓ Postman Collection Support")
 		fmt.Println("  ✓ CSV Data Integration")
 		fmt.Println("  ✓ Template Variable Replacement")
+		fmt.Println("  ✓ Authentication (Bearer, API Key, Basic)")
 		fmt.Println("  ✓ Concurrent Execution")
 		fmt.Println("  ✓ Progress Tracking & Metrics")
 		fmt.Println("  ✓ Failed Request Logging")
