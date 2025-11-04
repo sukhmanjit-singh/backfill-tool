@@ -407,7 +407,8 @@ func processItem(item PostmanItem, requestList []map[string]string, config RunCo
 	if len(metrics.FailedRequests) > 0 {
 		failedFile := saveFailedRequests(metrics.FailedRequests, item.Name)
 		if !config.Quiet && failedFile != "" {
-			fmt.Printf("%s   %s\n", indent, colorize(colorYellow, "❌ Failed requests saved to: "+failedFile))
+			fmt.Printf("%s   %s\n", indent, colorize(colorYellow, fmt.Sprintf("❌ Failed: %d requests saved to %s", len(metrics.FailedRequests), failedFile)))
+			fmt.Printf("%s   %s\n", indent, colorize(colorGray, "   (CSV includes error details: status code, message, URL, timestamp)"))
 		}
 	}
 
@@ -441,8 +442,8 @@ func worker(id int, item PostmanItem, records chan map[string]string, results ch
 			RecordInfo:  recordInfo,
 		}
 
-		// Replace URL variables
-		finalURL, err := replaceURLVariables(item.Request.URL.Raw, csvRow)
+		// Replace URL variables (path variables and query parameters)
+		finalURL, err := BuildURLWithQueryParams(item.Request.URL, csvRow)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("Error processing URL: %v", err)
@@ -527,6 +528,9 @@ func worker(id int, item PostmanItem, records chan map[string]string, results ch
 }
 
 // saveFailedRequests saves failed requests to a CSV file for retry
+// The CSV includes original data columns PLUS error detail columns at the end
+// This allows both: (1) easy retry by re-uploading, (2) viewing error details
+// Error columns are ignored during retry since they don't match template variables
 func saveFailedRequests(failedRequests []RequestResult, requestName string) string {
 	if len(failedRequests) == 0 {
 		return ""
@@ -546,12 +550,7 @@ func saveFailedRequests(failedRequests []RequestResult, requestName string) stri
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	// Get headers from first failed request (CSV columns)
-	if len(failedRequests) == 0 {
-		return ""
-	}
-
-	// Collect all unique CSV column names
+	// Collect all unique CSV column names from original data
 	headers := []string{}
 	headerMap := make(map[string]bool)
 	for _, fr := range failedRequests {
@@ -563,19 +562,56 @@ func saveFailedRequests(failedRequests []RequestResult, requestName string) stri
 		}
 	}
 
-	// Write header
-	writer.Write(headers)
+	// Add error detail columns at the end (these will be ignored on retry)
+	errorColumns := []string{
+		"_error_status_code",
+		"_error_message",
+		"_error_url",
+		"_error_method",
+		"_error_timestamp",
+		"_error_response_time_ms",
+	}
+	allHeaders := append(headers, errorColumns...)
 
-	// Write failed request data (original CSV format for retry)
+	// Write header row
+	writer.Write(allHeaders)
+
+	// Write failed request data with error details
 	for _, fr := range failedRequests {
-		row := make([]string, len(headers))
+		row := make([]string, len(allHeaders))
+
+		// Fill original CSV columns
 		for i, header := range headers {
 			row[i] = fr.CSVData[header]
 		}
+
+		// Fill error detail columns
+		offset := len(headers)
+		row[offset+0] = fmt.Sprintf("%d", fr.StatusCode)
+		row[offset+1] = cleanErrorMessage(fr.Error)
+		row[offset+2] = fr.URL
+		row[offset+3] = fr.Method
+		row[offset+4] = fr.Timestamp.Format(time.RFC3339)
+		row[offset+5] = fmt.Sprintf("%d", fr.ResponseTime.Milliseconds())
+
 		writer.Write(row)
 	}
 
 	return filename
+}
+
+// cleanErrorMessage removes problematic characters from error messages for CSV
+func cleanErrorMessage(errMsg string) string {
+	// Replace newlines and carriage returns with spaces
+	errMsg = strings.ReplaceAll(errMsg, "\n", " ")
+	errMsg = strings.ReplaceAll(errMsg, "\r", " ")
+	// Replace multiple spaces with single space
+	errMsg = strings.Join(strings.Fields(errMsg), " ")
+	// Truncate if too long
+	if len(errMsg) > 500 {
+		errMsg = errMsg[:497] + "..."
+	}
+	return errMsg
 }
 
 // saveMetrics saves execution metrics to JSON file
@@ -724,13 +760,64 @@ func getRecordInfo(record map[string]string) string {
 }
 
 // replaceURLVariables replaces template variables in the URL
+// Handles both path variables and query parameters with proper URL encoding
 func replaceURLVariables(rawURL string, csvData map[string]string) (string, error) {
+	// First, replace template variables in the raw URL
 	finalURL := replaceTemplateVariables(rawURL, csvData)
-	_, err := url.Parse(finalURL)
+
+	// Parse the URL to validate and potentially add query params
+	parsedURL, err := url.Parse(finalURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL after replacement: %v", err)
 	}
-	return finalURL, nil
+
+	return parsedURL.String(), nil
+}
+
+// BuildURLWithQueryParams constructs a complete URL with query parameters
+// It handles both Postman's structured query params and raw URL query strings
+// All query parameter values support template variable replacement
+// Exported for testing purposes
+func BuildURLWithQueryParams(postmanURL PostmanURL, csvData map[string]string) (string, error) {
+	// Start with the raw URL and replace path variables
+	baseURL := replaceTemplateVariables(postmanURL.Raw, csvData)
+
+	// Parse the base URL
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %v", err)
+	}
+
+	// If Postman has structured query parameters, process them
+	if len(postmanURL.Query) > 0 {
+		queryParams := url.Values{}
+
+		// First, preserve any existing query params from the raw URL
+		existingParams := parsedURL.Query()
+		for key, values := range existingParams {
+			for _, value := range values {
+				queryParams.Add(key, value)
+			}
+		}
+
+		// Add/override with Postman's structured query parameters
+		for _, param := range postmanURL.Query {
+			if param.Key == "" {
+				continue // Skip empty keys
+			}
+
+			// Replace template variables in the query parameter value
+			paramValue := replaceTemplateVariables(param.Value, csvData)
+
+			// Set the parameter (replaces existing values with same key)
+			queryParams.Set(param.Key, paramValue)
+		}
+
+		// Build the final URL with encoded query parameters
+		parsedURL.RawQuery = queryParams.Encode()
+	}
+
+	return parsedURL.String(), nil
 }
 
 // replaceTemplateVariables replaces all {{variableName}} patterns in a string

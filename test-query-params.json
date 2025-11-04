@@ -1,0 +1,146 @@
+{
+  "info": {
+    "name": "Query Parameters Test Collection",
+    "_postman_id": "query-params-test-123",
+    "description": "Comprehensive tests for query parameter replacement with CSV data",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Simple Query Parameters (Raw URL)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/search?q={{query}}&limit={{limit}}&offset={{offset}}"
+        },
+        "header": []
+      }
+    },
+    {
+      "name": "Structured Query Parameters",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/users",
+          "query": [
+            {
+              "key": "name",
+              "value": "{{name}}"
+            },
+            {
+              "key": "email",
+              "value": "{{email}}"
+            },
+            {
+              "key": "year",
+              "value": "{{year}}"
+            },
+            {
+              "key": "status",
+              "value": "active"
+            }
+          ]
+        },
+        "header": []
+      }
+    },
+    {
+      "name": "Mixed Path and Query Parameters",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/users/{{userId}}/posts?limit={{limit}}&tag={{tag}}"
+        },
+        "header": []
+      }
+    },
+    {
+      "name": "Query Params with Special Characters",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/search",
+          "query": [
+            {
+              "key": "q",
+              "value": "{{searchTerm}}"
+            },
+            {
+              "key": "filter",
+              "value": "{{filterType}}"
+            }
+          ]
+        },
+        "header": []
+      }
+    },
+    {
+      "name": "POST with Query Parameters",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "https://api.example.com/users?notify={{notify}}&async={{async}}",
+          "query": [
+            {
+              "key": "notify",
+              "value": "{{notify}}"
+            },
+            {
+              "key": "async",
+              "value": "{{async}}"
+            }
+          ]
+        },
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"{{name}}\",\n  \"email\": \"{{email}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Multiple Values Same Parameter",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/filter?category={{category1}}&category={{category2}}"
+        },
+        "header": []
+      }
+    },
+    {
+      "name": "Query Params Folder",
+      "item": [
+        {
+          "name": "Nested Query Params Example",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "https://api.example.com/data",
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                },
+                {
+                  "key": "startDate",
+                  "value": "{{startDate}}"
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{endDate}}"
+                }
+              ]
+            },
+            "header": []
+          }
+        }
+      ]
+    }
+  ]
+}
