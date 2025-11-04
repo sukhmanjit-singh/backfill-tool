@@ -1001,3 +1001,249 @@ backfill-tool run -c collection.json -s data.csv -t 20 --quiet --metrics-file ./
 backfill-tool run -c collection.json -s failed_requests_*.csv -t 2
 ```
 
+
+## 🔗 Query Parameters - Complete Guide
+
+### Overview
+
+The backfill tool supports comprehensive query parameter replacement from CSV data. Query parameters can be specified in two ways:
+
+1. **Raw URL template** - Parameters directly in the URL string
+2. **Structured parameters** - Postman's query parameter array
+
+Both methods support template variable replacement with proper URL encoding.
+
+### Method 1: Raw URL Template
+
+Simply include `{{variableName}}` placeholders in your URL query string:
+
+**Postman Collection:**
+```json
+{
+  "url": {
+    "raw": "https://api.example.com/search?q={{query}}&limit={{limit}}&offset={{offset}}"
+  }
+}
+```
+
+**CSV File:**
+```csv
+query,limit,offset
+smartphones,10,0
+tablets,20,10
+laptops,15,20
+```
+
+**Generated URLs:**
+- `https://api.example.com/search?q=smartphones&limit=10&offset=0`
+- `https://api.example.com/search?q=tablets&limit=20&offset=10`
+- `https://api.example.com/search?q=laptops&limit=15&offset=20`
+
+### Method 2: Structured Query Parameters (Postman)
+
+Use Postman's query parameter array for better organization:
+
+**Postman Collection:**
+```json
+{
+  "url": {
+    "raw": "https://api.example.com/users",
+    "query": [
+      {
+        "key": "name",
+        "value": "{{name}}"
+      },
+      {
+        "key": "email",
+        "value": "{{email}}"
+      },
+      {
+        "key": "status",
+        "value": "active"
+      }
+    ]
+  }
+}
+```
+
+**CSV File:**
+```csv
+name,email
+Alice Smith,alice@example.com
+Bob Johnson,bob@example.com
+```
+
+**Generated URLs:**
+- `https://api.example.com/users?email=alice%40example.com&name=Alice+Smith&status=active`
+- `https://api.example.com/users?email=bob%40example.com&name=Bob+Johnson&status=active`
+
+Note: Email addresses are properly URL-encoded (`@` becomes `%40`).
+
+### Combining Path Variables and Query Parameters
+
+You can use both path variables and query parameters together:
+
+**Postman Collection:**
+```json
+{
+  "url": {
+    "raw": "https://api.example.com/users/{{userId}}/posts?limit={{limit}}&tag={{tag}}"
+  }
+}
+```
+
+**CSV File:**
+```csv
+userId,limit,tag
+123,10,urgent
+456,20,normal
+```
+
+**Generated URLs:**
+- `https://api.example.com/users/123/posts?limit=10&tag=urgent`
+- `https://api.example.com/users/456/posts?limit=20&tag=normal`
+
+### Special Characters & URL Encoding
+
+The tool automatically handles URL encoding for special characters:
+
+**CSV File:**
+```csv
+searchTerm,filter
+camera & lens,type:dslr
+laptop (15 inch),brand:dell
+```
+
+**Generated Query String:**
+```
+?searchTerm=camera+%26+lens&filter=type%3Adslr
+?searchTerm=laptop+%2815+inch%29&filter=brand%3Adell
+```
+
+Special characters are encoded:
+- Space → `+` or `%20`
+- `&` → `%26`
+- `=` → `%3D`
+- `(` → `%28`
+- `)` → `%29`
+- `:` → `%3A`
+- `@` → `%40`
+
+### Multiple Query Parameters with Same Name
+
+Some APIs accept multiple values for the same parameter:
+
+**Postman Collection:**
+```json
+{
+  "url": {
+    "raw": "https://api.example.com/filter?category={{category1}}&category={{category2}}"
+  }
+}
+```
+
+**CSV File:**
+```csv
+category1,category2
+tech,gadgets
+hardware,software
+```
+
+**Generated URLs:**
+- `https://api.example.com/filter?category=tech&category=gadgets`
+- `https://api.example.com/filter?category=hardware&category=software`
+
+### Query Parameters with POST/PUT Requests
+
+Query parameters work with all HTTP methods:
+
+**Postman Collection:**
+```json
+{
+  "method": "POST",
+  "url": {
+    "raw": "https://api.example.com/users?notify={{notify}}&async={{async}}"
+  },
+  "body": {
+    "raw": "{\"name\": \"{{name}}\"}"
+  }
+}
+```
+
+**CSV File:**
+```csv
+name,notify,async
+Alice,true,false
+Bob,false,true
+```
+
+**Result:**
+- POST to `https://api.example.com/users?notify=true&async=false` with body `{"name": "Alice"}`
+- POST to `https://api.example.com/users?notify=false&async=true` with body `{"name": "Bob"}`
+
+### Testing Query Parameters
+
+Use the included test files to verify query parameter functionality:
+
+```bash
+# Test basic query parameters
+./backfill-tool run -c test-query-params.json -s test-query-params.csv -t 2
+
+# The test collection includes:
+# - Simple query parameters in raw URL
+# - Structured query parameters (Postman array)
+# - Mixed path and query parameters
+# - Special character encoding
+# - POST requests with query params
+```
+
+### Best Practices
+
+1. **Use Structured Parameters** for better readability in Postman
+2. **URL Encode in CSV** is NOT needed - the tool handles encoding automatically
+3. **Empty Values** are supported - empty CSV fields result in empty query param values
+4. **Static Parameters** can be mixed with dynamic ones (e.g., `status=active` + `name={{name}}`)
+5. **Test in Postman First** - verify your collection works before bulk execution
+
+### Common Patterns
+
+#### Pagination
+```csv
+page,pageSize
+1,100
+2,100
+3,100
+```
+URL: `/api/data?page={{page}}&pageSize={{pageSize}}`
+
+#### Filtering
+```csv
+startDate,endDate,status
+2025-01-01,2025-01-31,active
+2025-02-01,2025-02-28,pending
+```
+URL: `/api/records?startDate={{startDate}}&endDate={{endDate}}&status={{status}}`
+
+#### Search with Filters
+```csv
+query,category,minPrice,maxPrice
+laptops,electronics,500,2000
+phones,mobile,200,1500
+```
+URL: `/api/search?q={{query}}&category={{category}}&minPrice={{minPrice}}&maxPrice={{maxPrice}}`
+
+### Troubleshooting
+
+**Query params not being replaced?**
+- Check CSV column names match exactly (case-sensitive)
+- Verify `{{variableName}}` syntax is correct
+- Try verbose mode to see generated URLs
+
+**Special characters not encoded?**
+- This is handled automatically - no action needed
+- If you pre-encode in CSV, it will be double-encoded
+
+**Parameters in wrong order?**
+- Query parameter order may vary (this is normal and doesn't affect functionality)
+- APIs should accept parameters in any order
+

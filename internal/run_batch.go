@@ -441,8 +441,8 @@ func worker(id int, item PostmanItem, records chan map[string]string, results ch
 			RecordInfo:  recordInfo,
 		}
 
-		// Replace URL variables
-		finalURL, err := replaceURLVariables(item.Request.URL.Raw, csvRow)
+		// Replace URL variables (path variables and query parameters)
+		finalURL, err := BuildURLWithQueryParams(item.Request.URL, csvRow)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("Error processing URL: %v", err)
@@ -724,13 +724,64 @@ func getRecordInfo(record map[string]string) string {
 }
 
 // replaceURLVariables replaces template variables in the URL
+// Handles both path variables and query parameters with proper URL encoding
 func replaceURLVariables(rawURL string, csvData map[string]string) (string, error) {
+	// First, replace template variables in the raw URL
 	finalURL := replaceTemplateVariables(rawURL, csvData)
-	_, err := url.Parse(finalURL)
+
+	// Parse the URL to validate and potentially add query params
+	parsedURL, err := url.Parse(finalURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL after replacement: %v", err)
 	}
-	return finalURL, nil
+
+	return parsedURL.String(), nil
+}
+
+// BuildURLWithQueryParams constructs a complete URL with query parameters
+// It handles both Postman's structured query params and raw URL query strings
+// All query parameter values support template variable replacement
+// Exported for testing purposes
+func BuildURLWithQueryParams(postmanURL PostmanURL, csvData map[string]string) (string, error) {
+	// Start with the raw URL and replace path variables
+	baseURL := replaceTemplateVariables(postmanURL.Raw, csvData)
+
+	// Parse the base URL
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %v", err)
+	}
+
+	// If Postman has structured query parameters, process them
+	if len(postmanURL.Query) > 0 {
+		queryParams := url.Values{}
+
+		// First, preserve any existing query params from the raw URL
+		existingParams := parsedURL.Query()
+		for key, values := range existingParams {
+			for _, value := range values {
+				queryParams.Add(key, value)
+			}
+		}
+
+		// Add/override with Postman's structured query parameters
+		for _, param := range postmanURL.Query {
+			if param.Key == "" {
+				continue // Skip empty keys
+			}
+
+			// Replace template variables in the query parameter value
+			paramValue := replaceTemplateVariables(param.Value, csvData)
+
+			// Set the parameter (replaces existing values with same key)
+			queryParams.Set(param.Key, paramValue)
+		}
+
+		// Build the final URL with encoded query parameters
+		parsedURL.RawQuery = queryParams.Encode()
+	}
+
+	return parsedURL.String(), nil
 }
 
 // replaceTemplateVariables replaces all {{variableName}} patterns in a string

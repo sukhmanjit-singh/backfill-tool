@@ -1,0 +1,4 @@
+userId,name,email,year,query,limit,offset,tag,searchTerm,filterType,notify,async,category1,category2,startDate,endDate
+1,Alice Smith,alice@example.com,2020,smartphones,10,0,urgent,laptop reviews,electronics,true,false,tech,gadgets,2025-01-01,2025-12-31
+2,Bob Johnson,bob@example.com,2021,tablets,20,10,normal,phone specs,mobile,false,true,computers,software,2025-02-01,2025-11-30
+3,Charlie Brown,charlie@example.com,2019,laptops,15,20,high,camera & lens,photography,true,true,hardware,accessories,2025-03-01,2025-10-31
