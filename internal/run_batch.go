@@ -91,14 +91,15 @@ type PostmanHeader struct {
 }
 
 // PostmanAuth represents authentication configuration in Postman
+// Supports both array format and object format for compatibility
 type PostmanAuth struct {
-	Type   string          `json:"type"` // "bearer", "apikey", "basic", etc.
-	Bearer []PostmanKV     `json:"bearer,omitempty"`
-	APIKey []PostmanKV     `json:"apikey,omitempty"`
-	Basic  []PostmanKV     `json:"basic,omitempty"`
+	Type      string          `json:"type"` // "bearer", "apikey", "basic", etc.
+	BearerRaw json.RawMessage `json:"bearer,omitempty"`
+	APIKeyRaw json.RawMessage `json:"apikey,omitempty"`
+	BasicRaw  json.RawMessage `json:"basic,omitempty"`
 }
 
-// PostmanKV represents key-value pairs in auth configuration
+// PostmanKV represents key-value pairs in auth configuration (array format)
 type PostmanKV struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
@@ -445,11 +446,11 @@ func processItem(item PostmanItem, requestList []map[string]string, config RunCo
 func resolveAuth(collectionAuth *PostmanAuth, requestAuth *PostmanAuth, cliToken string) *PostmanAuth {
 	// CLI override takes precedence
 	if cliToken != "" {
+		// Create bearer token in object format for CLI override
+		bearerJSON, _ := json.Marshal(map[string]string{"token": cliToken})
 		return &PostmanAuth{
-			Type: "bearer",
-			Bearer: []PostmanKV{
-				{Key: "token", Value: cliToken, Type: "string"},
-			},
+			Type:      "bearer",
+			BearerRaw: json.RawMessage(bearerJSON),
 		}
 	}
 
@@ -463,7 +464,8 @@ func resolveAuth(collectionAuth *PostmanAuth, requestAuth *PostmanAuth, cliToken
 }
 
 // applyAuth applies authentication to an HTTP request
-// Supports bearer tokens, API keys, and basic auth with template variable replacement
+// Supports both object format {"token": "abc"} and array format [{"key": "token", "value": "abc"}]
+// Handles bearer tokens, API keys, and basic auth with template variable replacement
 func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) {
 	if auth == nil {
 		return
@@ -471,14 +473,7 @@ func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) 
 
 	switch auth.Type {
 	case "bearer":
-		// Extract bearer token value
-		token := ""
-		for _, kv := range auth.Bearer {
-			if kv.Key == "token" {
-				token = kv.Value
-				break
-			}
-		}
+		token := extractBearerToken(auth.BearerRaw)
 		if token != "" {
 			// Replace template variables in token
 			token = replaceTemplateVariables(token, csvData)
@@ -486,16 +481,7 @@ func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) 
 		}
 
 	case "apikey":
-		// Extract API key header name and value
-		keyName := ""
-		keyValue := ""
-		for _, kv := range auth.APIKey {
-			if kv.Key == "key" {
-				keyName = kv.Value
-			} else if kv.Key == "value" {
-				keyValue = kv.Value
-			}
-		}
+		keyName, keyValue := extractAPIKey(auth.APIKeyRaw)
 		if keyName != "" && keyValue != "" {
 			// Replace template variables in both key and value
 			keyName = replaceTemplateVariables(keyName, csvData)
@@ -504,16 +490,7 @@ func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) 
 		}
 
 	case "basic":
-		// Extract username and password
-		username := ""
-		password := ""
-		for _, kv := range auth.Basic {
-			if kv.Key == "username" {
-				username = kv.Value
-			} else if kv.Key == "password" {
-				password = kv.Value
-			}
-		}
+		username, password := extractBasicAuth(auth.BasicRaw)
 		if username != "" {
 			// Replace template variables
 			username = replaceTemplateVariables(username, csvData)
@@ -521,6 +498,99 @@ func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) 
 			req.SetBasicAuth(username, password)
 		}
 	}
+}
+
+// extractBearerToken extracts bearer token from either object or array format
+func extractBearerToken(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	// Try object format first: {"token": "abc"}
+	var objFormat struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &objFormat); err == nil && objFormat.Token != "" {
+		return objFormat.Token
+	}
+
+	// Try array format: [{"key": "token", "value": "abc"}]
+	var arrayFormat []PostmanKV
+	if err := json.Unmarshal(raw, &arrayFormat); err == nil {
+		for _, kv := range arrayFormat {
+			if kv.Key == "token" {
+				return kv.Value
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractAPIKey extracts API key from either object or array format
+func extractAPIKey(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+
+	// Try object format first: {"key": "X-API-Key", "value": "abc"}
+	var objFormat struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &objFormat); err == nil && objFormat.Key != "" {
+		return objFormat.Key, objFormat.Value
+	}
+
+	// Try array format: [{"key": "key", "value": "X-API-Key"}, {"key": "value", "value": "abc"}]
+	var arrayFormat []PostmanKV
+	if err := json.Unmarshal(raw, &arrayFormat); err == nil {
+		keyName := ""
+		keyValue := ""
+		for _, kv := range arrayFormat {
+			if kv.Key == "key" {
+				keyName = kv.Value
+			} else if kv.Key == "value" {
+				keyValue = kv.Value
+			}
+		}
+		return keyName, keyValue
+	}
+
+	return "", ""
+}
+
+// extractBasicAuth extracts basic auth credentials from either object or array format
+func extractBasicAuth(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+
+	// Try object format first: {"username": "user", "password": "pass"}
+	var objFormat struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(raw, &objFormat); err == nil && objFormat.Username != "" {
+		return objFormat.Username, objFormat.Password
+	}
+
+	// Try array format: [{"key": "username", "value": "user"}, {"key": "password", "value": "pass"}]
+	var arrayFormat []PostmanKV
+	if err := json.Unmarshal(raw, &arrayFormat); err == nil {
+		username := ""
+		password := ""
+		for _, kv := range arrayFormat {
+			if kv.Key == "username" {
+				username = kv.Value
+			} else if kv.Key == "password" {
+				password = kv.Value
+			}
+		}
+		return username, password
+	}
+
+	return "", ""
 }
 
 // worker processes CSV records and executes HTTP requests
