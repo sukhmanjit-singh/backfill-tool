@@ -1247,3 +1247,170 @@ URL: `/api/search?q={{query}}&category={{category}}&minPrice={{minPrice}}&maxPri
 - Query parameter order may vary (this is normal and doesn't affect functionality)
 - APIs should accept parameters in any order
 
+## 📋 Enhanced Failed Request Logging
+
+### Overview
+
+When requests fail, the tool automatically saves them to a CSV file with **complete error details**. The CSV is designed to serve two purposes:
+
+1. **Easy Retry** - Re-upload the same CSV to retry failed requests
+2. **Error Analysis** - View detailed error information for debugging
+
+### CSV Format
+
+The failed requests CSV contains:
+
+**Original Data Columns** (from your input CSV)
+- All original columns preserved exactly
+- Same order as input CSV
+- Can be directly re-uploaded
+
+**Error Detail Columns** (added automatically)
+- `_error_status_code` - HTTP status code (200, 404, 500, etc.) or 0 for connection errors
+- `_error_message` - Detailed error message from the API
+- `_error_url` - Complete URL that was called (with variables replaced)
+- `_error_method` - HTTP method used (GET, POST, PUT, etc.)
+- `_error_timestamp` - When the request failed (RFC3339 format)
+- `_error_response_time_ms` - How long the request took in milliseconds
+
+### Example Failed Requests CSV
+
+```csv
+name,year,userId,email,_error_status_code,_error_message,_error_url,_error_method,_error_timestamp,_error_response_time_ms
+Alice Smith,2020,1,alice@example.com,500,HTTP 500: Internal Server Error,https://api.example.com/users,POST,2025-11-04T10:30:45Z,1234
+Bob Johnson,2021,2,bob@example.com,404,HTTP 404: User not found,https://api.example.com/users,POST,2025-11-04T10:30:46Z,234
+Charlie Brown,2019,3,charlie@example.com,0,Request failed: connection refused,https://api.example.com/users,POST,2025-11-04T10:30:47Z,5000
+```
+
+### How To Use
+
+#### 1. View Error Details
+
+Open the CSV in Excel, Google Sheets, or any spreadsheet application:
+
+- **Sort by status code** to group similar errors
+- **Filter by error message** to find patterns
+- **Check response times** to identify slow requests
+- **Review URLs** to verify correct variable replacement
+
+#### 2. Retry Failed Requests
+
+Simply re-upload the same CSV - error columns are automatically ignored:
+
+```bash
+# First run - some failures
+./backfill-tool run -c collection.json -s data.csv -t 10
+
+# Output shows:
+# ❌ Failed: 13 requests saved to failed_requests_Create_User_20251104_103045.csv
+
+# Retry just the failed ones
+./backfill-tool run -c collection.json -s failed_requests_Create_User_20251104_103045.csv -t 5
+```
+
+The tool ignores the `_error_*` columns because they don't match any template variables in your collection.
+
+#### 3. Analyze Patterns
+
+```bash
+# Count errors by status code
+cut -d',' -f6 failed_requests_*.csv | sort | uniq -c
+
+# Find all 500 errors
+grep ",500," failed_requests_*.csv
+
+# Check which URLs failed most
+cut -d',' -f8 failed_requests_*.csv | sort | uniq -c | sort -rn
+```
+
+### Error Status Codes
+
+| Status Code | Meaning | Common Causes |
+|-------------|---------|---------------|
+| 0 | Connection Error | Network issues, DNS failure, timeout |
+| 400 | Bad Request | Invalid data format, missing required fields |
+| 401 | Unauthorized | Missing or invalid authentication |
+| 403 | Forbidden | Valid auth but insufficient permissions |
+| 404 | Not Found | Resource doesn't exist (check path variables) |
+| 429 | Too Many Requests | Rate limiting - reduce thread count |
+| 500 | Internal Server Error | API server issue - retry later |
+| 502 | Bad Gateway | Proxy/load balancer issue |
+| 503 | Service Unavailable | API temporarily down |
+| 504 | Gateway Timeout | Request took too long |
+
+### Common Error Messages
+
+**Connection Errors (Status Code = 0)**
+- `Request failed: connection refused` - Service not running
+- `Request failed: timeout` - Request took longer than 30 seconds
+- `Request failed: no such host` - DNS resolution failed
+- `Request failed: EOF` - Connection closed unexpectedly
+
+**HTTP Errors (Status Code > 0)**
+- `HTTP 400: Bad Request` - Check request body format
+- `HTTP 401: Unauthorized` - Add authentication headers
+- `HTTP 404: Not found` - Verify URL path variables
+- `HTTP 500: Internal Server Error` - Server-side issue
+
+### Retry Strategies
+
+#### Strategy 1: Retry All Failures
+
+```bash
+# Simple retry with lower concurrency
+./backfill-tool run -c collection.json -s failed_requests_*.csv -t 2
+```
+
+#### Strategy 2: Filter by Error Type
+
+```bash
+# Extract only timeout errors (0 status or took >5000ms)
+awk -F',' '$6 == 0 || $11 > 5000' failed_requests_Create_User_20251104.csv > timeouts.csv
+
+# Retry just timeouts with minimal concurrency
+./backfill-tool run -c collection.json -s timeouts.csv -t 1
+```
+
+#### Strategy 3: Retry 5xx Errors Only
+
+```bash
+# Server errors might succeed on retry
+awk -F',' '$6 >= 500 && $6 < 600' failed_requests_*.csv > server_errors.csv
+
+# Retry server errors
+./backfill-tool run -c collection.json -s server_errors.csv -t 5
+```
+
+#### Strategy 4: Fix Data and Retry 4xx Errors
+
+```bash
+# 4xx errors usually indicate data problems
+# Review error messages first
+grep ",4" failed_requests_*.csv | less
+
+# Fix the data in CSV
+# Then retry
+./backfill-tool run -c collection.json -s fixed_data.csv -t 10
+```
+
+### Best Practices
+
+1. **Always Review Errors** - Check the CSV before retrying
+2. **Reduce Threads for Retries** - Failed requests often indicate issues; go slower
+3. **Look for Patterns** - If all failures have the same error, fix the root cause
+4. **Check Status Codes** - 4xx = client issue, 5xx = server issue
+5. **Monitor Response Times** - High response times might indicate API strain
+
+### Troubleshooting
+
+**Error columns are empty?**
+- Request failed before getting a response
+- Check _error_message for connection errors
+
+**Can't re-upload CSV?**
+- Make sure you're uploading to the same collection
+- Error columns are harmless - they'll be ignored
+
+**Too many retries?**
+- If retrying doesn't help after 2-3 attempts, investigate the root cause
+- Check metrics.json for patterns

@@ -69,7 +69,7 @@ Example CSV:
 
 		// Show startup info
 		if !quiet {
-			fmt.Println("🚀 Backfill Tool v2.0.0")
+			fmt.Println("🚀 Backfill Tool v2.2.0")
 			fmt.Printf("📦 Collection: %s\n", collection)
 			fmt.Printf("📊 CSV Data: %s\n", csv)
 			fmt.Printf("⚙️  Workers: %d\n", threads)
