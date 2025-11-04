@@ -14,6 +14,7 @@ var (
 	csv         string
 	metricsFile string
 	noProgress  bool
+	bearerToken string
 )
 
 var runCmd = &cobra.Command{
@@ -31,10 +32,11 @@ The tool automatically:
   • Saves execution metrics to a JSON file
   • Processes nested folders in collections
   • Uses concurrent workers for high performance
+  • Supports authentication (Bearer, API Key, Basic)
 
 Template Variables:
   Use {{columnName}} syntax in your Postman collection to reference CSV columns.
-  Supported in: URLs, query parameters, headers, and request bodies.
+  Supported in: URLs, query parameters, headers, request bodies, and auth tokens.
 
 Example Collection URL:
   https://api.example.com/users/{{userId}}/posts/{{postId}}?tag={{tag}}
@@ -46,6 +48,12 @@ Example CSV:
 
 	Example: `  # Basic usage with 10 concurrent workers
   backfill-tool run -c collection.json -s data.csv -t 10
+
+  # With bearer token authentication (overrides collection auth)
+  backfill-tool run -c collection.json -s data.csv -t 10 -a "your_token_here"
+
+  # Bearer token from environment variable
+  backfill-tool run -c collection.json -s data.csv -t 10 -a "$API_TOKEN"
 
   # High concurrency for internal APIs
   backfill-tool run -c collection.json -s data.csv -t 50
@@ -69,7 +77,7 @@ Example CSV:
 
 		// Show startup info
 		if !quiet {
-			fmt.Println("🚀 Backfill Tool v2.2.0")
+			fmt.Println("🚀 Backfill Tool v2.3.0")
 			fmt.Printf("📦 Collection: %s\n", collection)
 			fmt.Printf("📊 CSV Data: %s\n", csv)
 			fmt.Printf("⚙️  Workers: %d\n", threads)
@@ -81,13 +89,14 @@ Example CSV:
 
 		// Create run configuration
 		config := internal.RunConfig{
-			BatchSize:   batchSize,
-			Threads:     threads,
-			Collection:  collection,
-			CSV:         csv,
-			MetricsFile: metricsFile,
-			Verbose:     verbose,
-			Quiet:       quiet,
+			BatchSize:    batchSize,
+			Threads:      threads,
+			Collection:   collection,
+			CSV:          csv,
+			MetricsFile:  metricsFile,
+			Verbose:      verbose,
+			Quiet:        quiet,
+			BearerToken:  bearerToken,
 		}
 
 		// Execute the batch run
@@ -111,6 +120,9 @@ func init() {
 	// Output configuration
 	runCmd.Flags().StringVarP(&metricsFile, "metrics-file", "m", "", "Path to save execution metrics JSON (default: metrics_<timestamp>.json)")
 	runCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress bars (deprecated: use --quiet instead)")
+
+	// Authentication
+	runCmd.Flags().StringVarP(&bearerToken, "bearer-token", "a", "", "Bearer token for authentication (overrides collection auth)")
 
 	// Add examples to help
 	runCmd.SetUsageTemplate(usageTemplate)

@@ -31,13 +31,14 @@ const (
 
 // RunConfig contains all configuration for a batch run
 type RunConfig struct {
-	BatchSize   int
-	Threads     int
-	Collection  string
-	CSV         string
-	MetricsFile string
-	Verbose     bool
-	Quiet       bool
+	BatchSize    int
+	Threads      int
+	Collection   string
+	CSV          string
+	MetricsFile  string
+	Verbose      bool
+	Quiet        bool
+	BearerToken  string // CLI override for bearer token
 }
 
 // PostmanCollection represents the top-level structure of a Postman collection JSON file
@@ -46,6 +47,7 @@ type PostmanCollection struct {
 		Name string `json:"name"`
 	} `json:"info"`
 	Item []PostmanItem `json:"item"`
+	Auth *PostmanAuth  `json:"auth,omitempty"` // Collection-level auth
 }
 
 // PostmanItem represents a single request or folder in the Postman collection
@@ -61,6 +63,7 @@ type PostmanRequest struct {
 	URL    PostmanURL      `json:"url"`
 	Header []PostmanHeader `json:"header"`
 	Body   PostmanBody     `json:"body"`
+	Auth   *PostmanAuth    `json:"auth,omitempty"` // Request-level auth
 }
 
 // PostmanURL represents the URL structure in Postman collections
@@ -85,6 +88,21 @@ type PostmanBody struct {
 type PostmanHeader struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+// PostmanAuth represents authentication configuration in Postman
+type PostmanAuth struct {
+	Type   string          `json:"type"` // "bearer", "apikey", "basic", etc.
+	Bearer []PostmanKV     `json:"bearer,omitempty"`
+	APIKey []PostmanKV     `json:"apikey,omitempty"`
+	Basic  []PostmanKV     `json:"basic,omitempty"`
+}
+
+// PostmanKV represents key-value pairs in auth configuration
+type PostmanKV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	Type  string `json:"type,omitempty"`
 }
 
 // RequestResult represents the outcome of a single HTTP request
@@ -295,7 +313,7 @@ func RunBatch(config RunConfig) {
 
 	// Process all items in the collection recursively
 	for _, item := range postmanCollection.Item {
-		processItem(item, requestList, config, runMetrics, 0)
+		processItem(item, requestList, config, runMetrics, 0, postmanCollection.Auth)
 	}
 
 	runMetrics.EndTime = time.Now()
@@ -312,7 +330,7 @@ func RunBatch(config RunConfig) {
 }
 
 // processItem recursively processes a Postman item (request or folder)
-func processItem(item PostmanItem, requestList []map[string]string, config RunConfig, runMetrics *RunMetrics, depth int) {
+func processItem(item PostmanItem, requestList []map[string]string, config RunConfig, runMetrics *RunMetrics, depth int, collectionAuth *PostmanAuth) {
 	indent := strings.Repeat("  ", depth)
 
 	// Check if this is a folder
@@ -321,7 +339,7 @@ func processItem(item PostmanItem, requestList []map[string]string, config RunCo
 			fmt.Printf("%s%s\n", indent, colorize(colorCyan, "📁 Folder: "+item.Name))
 		}
 		for _, nestedItem := range item.Item {
-			processItem(nestedItem, requestList, config, runMetrics, depth+1)
+			processItem(nestedItem, requestList, config, runMetrics, depth+1, collectionAuth)
 		}
 		return
 	}
@@ -362,7 +380,7 @@ func processItem(item PostmanItem, requestList []map[string]string, config RunCo
 	// Spawn workers
 	for i := 1; i <= config.Threads; i++ {
 		wg.Add(1)
-		go worker(i, item, recordsChan, resultsChan, &wg, config)
+		go worker(i, item, recordsChan, resultsChan, &wg, config, collectionAuth)
 	}
 
 	// Distribute work
@@ -420,8 +438,93 @@ func processItem(item PostmanItem, requestList []map[string]string, config RunCo
 	runMetrics.ItemMetrics = append(runMetrics.ItemMetrics, metrics)
 }
 
+// resolveAuth determines which auth to use based on hierarchy:
+// 1. CLI override (--bearer-token flag)
+// 2. Request-level auth
+// 3. Collection-level auth
+func resolveAuth(collectionAuth *PostmanAuth, requestAuth *PostmanAuth, cliToken string) *PostmanAuth {
+	// CLI override takes precedence
+	if cliToken != "" {
+		return &PostmanAuth{
+			Type: "bearer",
+			Bearer: []PostmanKV{
+				{Key: "token", Value: cliToken, Type: "string"},
+			},
+		}
+	}
+
+	// Request-level auth overrides collection auth
+	if requestAuth != nil {
+		return requestAuth
+	}
+
+	// Fall back to collection-level auth
+	return collectionAuth
+}
+
+// applyAuth applies authentication to an HTTP request
+// Supports bearer tokens, API keys, and basic auth with template variable replacement
+func applyAuth(req *http.Request, auth *PostmanAuth, csvData map[string]string) {
+	if auth == nil {
+		return
+	}
+
+	switch auth.Type {
+	case "bearer":
+		// Extract bearer token value
+		token := ""
+		for _, kv := range auth.Bearer {
+			if kv.Key == "token" {
+				token = kv.Value
+				break
+			}
+		}
+		if token != "" {
+			// Replace template variables in token
+			token = replaceTemplateVariables(token, csvData)
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+	case "apikey":
+		// Extract API key header name and value
+		keyName := ""
+		keyValue := ""
+		for _, kv := range auth.APIKey {
+			if kv.Key == "key" {
+				keyName = kv.Value
+			} else if kv.Key == "value" {
+				keyValue = kv.Value
+			}
+		}
+		if keyName != "" && keyValue != "" {
+			// Replace template variables in both key and value
+			keyName = replaceTemplateVariables(keyName, csvData)
+			keyValue = replaceTemplateVariables(keyValue, csvData)
+			req.Header.Set(keyName, keyValue)
+		}
+
+	case "basic":
+		// Extract username and password
+		username := ""
+		password := ""
+		for _, kv := range auth.Basic {
+			if kv.Key == "username" {
+				username = kv.Value
+			} else if kv.Key == "password" {
+				password = kv.Value
+			}
+		}
+		if username != "" {
+			// Replace template variables
+			username = replaceTemplateVariables(username, csvData)
+			password = replaceTemplateVariables(password, csvData)
+			req.SetBasicAuth(username, password)
+		}
+	}
+}
+
 // worker processes CSV records and executes HTTP requests
-func worker(id int, item PostmanItem, records chan map[string]string, results chan RequestResult, wg *sync.WaitGroup, config RunConfig) {
+func worker(id int, item PostmanItem, records chan map[string]string, results chan RequestResult, wg *sync.WaitGroup, config RunConfig, collectionAuth *PostmanAuth) {
 	defer wg.Done()
 
 	for csvRow := range records {
@@ -472,7 +575,11 @@ func worker(id int, item PostmanItem, records chan map[string]string, results ch
 			continue
 		}
 
-		// Set headers
+		// Resolve and apply authentication
+		auth := resolveAuth(collectionAuth, item.Request.Auth, config.BearerToken)
+		applyAuth(req, auth, csvRow)
+
+		// Set headers (after auth so explicit headers can override auth headers if needed)
 		for _, header := range item.Request.Header {
 			if header.Key == "" || header.Value == "" {
 				continue
